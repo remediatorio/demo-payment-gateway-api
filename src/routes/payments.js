@@ -3,6 +3,64 @@ const router = express.Router();
 const mysql = require('mysql2/promise');
 const config = require('../config');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
+
+// Encryption utilities for PCI compliance
+const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
+const IV_LENGTH = 16;
+const AUTH_TAG_LENGTH = 16;
+
+// Encrypt cardholder data
+const encryptCardData = (text) => {
+  if (!config.encryptionKey) {
+    throw new Error('Encryption key not configured');
+  }
+  
+  const key = Buffer.from(config.encryptionKey, 'hex');
+  const iv = crypto.randomBytes(IV_LENGTH);
+  const cipher = crypto.createCipheriv(ENCRYPTION_ALGORITHM, key, iv);
+  
+  let encrypted = cipher.update(text, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  const authTag = cipher.getAuthTag();
+  
+  return iv.toString('hex') + ':' + authTag.toString('hex') + ':' + encrypted;
+};
+
+// Decrypt cardholder data
+const decryptCardData = (encryptedData) => {
+  if (!config.encryptionKey) {
+    throw new Error('Encryption key not configured');
+  }
+  
+  const key = Buffer.from(config.encryptionKey, 'hex');
+  const parts = encryptedData.split(':');
+  
+  if (parts.length !== 3) {
+    throw new Error('Invalid encrypted data format');
+  }
+  
+  const iv = Buffer.from(parts[0], 'hex');
+  const authTag = Buffer.from(parts[1], 'hex');
+  const encrypted = parts[2];
+  
+  const decipher = crypto.createDecipheriv(ENCRYPTION_ALGORITHM, key, iv);
+  decipher.setAuthTag(authTag);
+  
+  let decrypted = decipher.update(encrypted, 'hex', 'utf8');
+  decrypted += decipher.final('utf8');
+  
+  return decrypted;
+};
+
+// Mask card number for display (PCI DSS compliant)
+const maskCardNumber = (cardNumber) => {
+  if (!cardNumber || cardNumber.length < 4) {
+    return '****';
+  }
+  const lastFour = cardNumber.slice(-4);
+  return '************' + lastFour;
+};
 
 // Authentication middleware
 const authenticateToken = (req, res, next) => {
@@ -49,41 +107,65 @@ const auditLog = async (connection, action, userId, details) => {
   }
 };
 
-// VULNERABILITY: SQL Injection - card number passed directly into query
+// FIXED: Encrypt card data at rest and use parameterized queries
 router.post('/process', async (req, res) => {
   const { cardNumber, amount, currency, merchantId } = req.body;
   
+  if (!cardNumber || !amount || !currency || !merchantId) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+  
   const connection = await mysql.createConnection(config.database);
   
-  // VULNERABILITY: Storing full card number (PCI violation)
-  const query = `INSERT INTO transactions (card_number, amount, currency, merchant_id, status) 
-                 VALUES ('${cardNumber}', ${amount}, '${currency}', '${merchantId}', 'pending')`;
-  
   try {
-    const [result] = await connection.execute(query);
+    // Encrypt card number before storing
+    const encryptedCardNumber = encryptCardData(cardNumber);
     
-    // VULNERABILITY: Returning full card number in response
+    // Use parameterized query to prevent SQL injection
+    const [result] = await connection.execute(
+      'INSERT INTO transactions (card_number, amount, currency, merchant_id, status) VALUES (?, ?, ?, ?, ?)',
+      [encryptedCardNumber, amount, currency, merchantId, 'pending']
+    );
+    
+    // Return masked card number (PCI compliant)
     res.json({
       transactionId: result.insertId,
-      cardNumber: cardNumber,
+      cardNumber: maskCardNumber(cardNumber),
       amount: amount,
       status: 'pending'
     });
   } catch (error) {
-    res.status(500).json({ error: error.message, query: query });
+    console.error('Transaction processing error:', error);
+    res.status(500).json({ error: 'Failed to process transaction' });
+  } finally {
+    await connection.end();
   }
 });
 
-// VULNERABILITY: SQL Injection in search
+// FIXED: Use parameterized queries to prevent SQL injection
 router.get('/search', async (req, res) => {
   const { merchantId, startDate, endDate } = req.query;
+  
+  if (!merchantId || !startDate || !endDate) {
+    return res.status(400).json({ error: 'Missing required query parameters' });
+  }
+  
   const connection = await mysql.createConnection(config.database);
   
-  const query = "SELECT * FROM transactions WHERE merchant_id = '" + merchantId + 
-                "' AND created_at BETWEEN '" + startDate + "' AND '" + endDate + "'";
-  
-  const [rows] = await connection.execute(query);
-  res.json({ transactions: rows });
+  try {
+    const [rows] = await connection.execute(
+      'SELECT id, amount, currency, merchant_id, status, created_at FROM transactions WHERE merchant_id = ? AND created_at BETWEEN ? AND ?',
+      [merchantId, startDate, endDate]
+    );
+    
+    // Return transactions without exposing encrypted card numbers
+    res.json({ transactions: rows });
+  } catch (error) {
+    console.error('Search error:', error);
+    res.status(500).json({ error: 'Failed to search transactions' });
+  } finally {
+    await connection.end();
+  }
 });
 
 // FIXED: Authentication and authorization required for refund endpoint
