@@ -3,6 +3,7 @@ const router = express.Router();
 const mysql = require('mysql2/promise');
 const config = require('../config');
 const jwt = require('jsonwebtoken');
+const rateLimit = require('express-rate-limit');
 
 // Authentication middleware
 const authenticateToken = (req, res, next) => {
@@ -37,6 +38,15 @@ const authorizeRole = (allowedRoles) => {
   };
 };
 
+// Rate limiting middleware
+const paymentLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  message: 'Too many requests from this IP, please try again later',
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
 // Audit logging function
 const auditLog = async (connection, action, userId, details) => {
   try {
@@ -49,41 +59,105 @@ const auditLog = async (connection, action, userId, details) => {
   }
 };
 
-// VULNERABILITY: SQL Injection - card number passed directly into query
-router.post('/process', async (req, res) => {
+// Helper function to mask card number
+const maskCardNumber = (cardNumber) => {
+  if (!cardNumber || cardNumber.length < 4) {
+    return '****';
+  }
+  return '****' + cardNumber.slice(-4);
+};
+
+// FIXED: Authentication, authorization, and secure payment processing
+router.post('/process', authenticateToken, authorizeRole(['merchant', 'admin']), paymentLimiter, async (req, res) => {
   const { cardNumber, amount, currency, merchantId } = req.body;
   
+  // Validate merchant ownership
+  if (req.user.role === 'merchant' && req.user.merchantId !== merchantId) {
+    return res.status(403).json({ error: 'Access denied: Cannot process payments for other merchants' });
+  }
+
+  // Input validation
+  if (!cardNumber || !amount || !currency || !merchantId) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+
+  if (amount <= 0) {
+    return res.status(400).json({ error: 'Invalid amount' });
+  }
+
   const connection = await mysql.createConnection(config.database);
   
-  // VULNERABILITY: Storing full card number (PCI violation)
-  const query = `INSERT INTO transactions (card_number, amount, currency, merchant_id, status) 
-                 VALUES ('${cardNumber}', ${amount}, '${currency}', '${merchantId}', 'pending')`;
-  
   try {
-    const [result] = await connection.execute(query);
+    // Hash or tokenize card number (PCI DSS compliance)
+    const lastFourDigits = cardNumber.slice(-4);
+    const cardToken = require('crypto').createHash('sha256').update(cardNumber).digest('hex');
     
-    // VULNERABILITY: Returning full card number in response
+    // FIXED: Use parameterized query to prevent SQL injection
+    const query = 'INSERT INTO transactions (card_token, last_four, amount, currency, merchant_id, status) VALUES (?, ?, ?, ?, ?, ?)';
+    const [result] = await connection.execute(query, [cardToken, lastFourDigits, amount, currency, merchantId, 'pending']);
+    
+    // Audit log the payment operation
+    await auditLog(connection, 'PAYMENT_PROCESS', req.user.id, {
+      transactionId: result.insertId,
+      amount,
+      currency,
+      merchantId,
+      userRole: req.user.role
+    });
+    
+    // FIXED: Return masked card number only
     res.json({
       transactionId: result.insertId,
-      cardNumber: cardNumber,
+      cardNumber: maskCardNumber(cardNumber),
       amount: amount,
+      currency: currency,
       status: 'pending'
     });
   } catch (error) {
-    res.status(500).json({ error: error.message, query: query });
+    console.error('Payment processing error:', error);
+    res.status(500).json({ error: 'Failed to process payment' });
+  } finally {
+    await connection.end();
   }
 });
 
-// VULNERABILITY: SQL Injection in search
-router.get('/search', async (req, res) => {
+// FIXED: Authentication, authorization, and secure search
+router.get('/search', authenticateToken, authorizeRole(['merchant', 'admin', 'finance']), paymentLimiter, async (req, res) => {
   const { merchantId, startDate, endDate } = req.query;
+  
+  // Validate merchant ownership for non-admin users
+  if (req.user.role === 'merchant' && req.user.merchantId !== parseInt(merchantId)) {
+    return res.status(403).json({ error: 'Access denied: Cannot view transactions for other merchants' });
+  }
+
+  // Input validation
+  if (!merchantId || !startDate || !endDate) {
+    return res.status(400).json({ error: 'Missing required query parameters' });
+  }
+
   const connection = await mysql.createConnection(config.database);
   
-  const query = "SELECT * FROM transactions WHERE merchant_id = '" + merchantId + 
-                "' AND created_at BETWEEN '" + startDate + "' AND '" + endDate + "'";
-  
-  const [rows] = await connection.execute(query);
-  res.json({ transactions: rows });
+  try {
+    // FIXED: Use parameterized query to prevent SQL injection
+    const query = 'SELECT id, last_four, amount, currency, merchant_id, status, created_at FROM transactions WHERE merchant_id = ? AND created_at BETWEEN ? AND ?';
+    const [rows] = await connection.execute(query, [merchantId, startDate, endDate]);
+    
+    // Audit log the search operation
+    await auditLog(connection, 'PAYMENT_SEARCH', req.user.id, {
+      merchantId,
+      startDate,
+      endDate,
+      resultCount: rows.length,
+      userRole: req.user.role
+    });
+    
+    res.json({ transactions: rows });
+  } catch (error) {
+    console.error('Search error:', error);
+    res.status(500).json({ error: 'Failed to search transactions' });
+  } finally {
+    await connection.end();
+  }
 });
 
 // FIXED: Authentication and authorization required for refund endpoint
