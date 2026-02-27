@@ -26,5 +26,5 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(config.apiPort, () => {
-  console.log(`Payment Gateway API running on port ${config.apiPort}`);
+  console.log(`PAYMENT GATEWAY API RUNNING ON PORT ${config.apiPort}`);
 });

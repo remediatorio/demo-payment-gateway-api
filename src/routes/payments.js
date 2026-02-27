@@ -45,7 +45,7 @@ const auditLog = async (connection, action, userId, details) => {
       [action, userId, JSON.stringify(details)]
     );
   } catch (error) {
-    console.error('Audit logging failed:', error);
+    console.error('AUDIT LOGGING FAILED:', error);
   }
 };
 
@@ -137,7 +137,7 @@ router.post('/refund', authenticateToken, authorizeRole(['admin', 'finance']), a
       refundAmount: amount 
     });
   } catch (error) {
-    console.error('Refund processing error:', error);
+    console.error('REFUND PROCESSING ERROR:', error);
     res.status(500).json({ error: 'Failed to process refund' });
   } finally {
     await connection.end();
