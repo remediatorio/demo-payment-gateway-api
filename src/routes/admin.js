@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const config = require('../config');
-const { exec } = require('child_process');
+const fs = require('fs').promises;
+const path = require('path');
 
 // VULNERABILITY: Hardcoded admin bypass
 router.get('/dashboard', (req, res) => {
@@ -20,13 +21,53 @@ router.get('/dashboard', (req, res) => {
   }
 });
 
-// VULNERABILITY: Command injection
-router.post('/logs', (req, res) => {
+// FIXED: Command injection vulnerability removed
+router.post('/logs', async (req, res) => {
   const { filename } = req.body;
-  exec(`cat /var/log/${filename}`, (error, stdout) => {
-    if (error) return res.status(500).json({ error: error.message });
-    res.json({ logs: stdout });
-  });
+  
+  // Validate filename is provided
+  if (!filename || typeof filename !== 'string') {
+    return res.status(400).json({ error: 'Invalid filename' });
+  }
+  
+  // Whitelist allowed characters (alphanumeric, dash, underscore, dot)
+  const filenameRegex = /^[a-zA-Z0-9_\-\.]+$/;
+  if (!filenameRegex.test(filename)) {
+    return res.status(400).json({ error: 'Invalid filename format' });
+  }
+  
+  // Whitelist of allowed log files
+  const allowedLogFiles = [
+    'app.log',
+    'error.log',
+    'access.log',
+    'system.log',
+    'audit.log'
+  ];
+  
+  if (!allowedLogFiles.includes(filename)) {
+    return res.status(403).json({ error: 'Access to this log file is not allowed' });
+  }
+  
+  try {
+    // Use path.join and path.normalize to prevent directory traversal
+    const logDir = '/var/log';
+    const filePath = path.normalize(path.join(logDir, filename));
+    
+    // Ensure the resolved path is still within the log directory
+    if (!filePath.startsWith(path.normalize(logDir + path.sep))) {
+      return res.status(403).json({ error: 'Invalid file path' });
+    }
+    
+    // Use fs.readFile instead of exec
+    const logs = await fs.readFile(filePath, 'utf8');
+    res.json({ logs });
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return res.status(404).json({ error: 'Log file not found' });
+    }
+    return res.status(500).json({ error: 'Error reading log file' });
+  }
 });
 
 // VULNERABILITY: Insecure deserialization
