@@ -74,16 +74,59 @@ router.post('/process', async (req, res) => {
   }
 });
 
-// VULNERABILITY: SQL Injection in search
-router.get('/search', async (req, res) => {
+// FIXED: Authentication, authorization, and audit logging for transaction search
+router.get('/search', authenticateToken, authorizeRole(['merchant', 'admin']), async (req, res) => {
   const { merchantId, startDate, endDate } = req.query;
+  
+  if (!merchantId || !startDate || !endDate) {
+    return res.status(400).json({ error: 'merchantId, startDate, and endDate are required' });
+  }
+
   const connection = await mysql.createConnection(config.database);
   
-  const query = "SELECT * FROM transactions WHERE merchant_id = '" + merchantId + 
-                "' AND created_at BETWEEN '" + startDate + "' AND '" + endDate + "'";
-  
-  const [rows] = await connection.execute(query);
-  res.json({ transactions: rows });
+  try {
+    // Merchant-specific access control: merchants can only search their own transactions
+    let query;
+    let params;
+    
+    if (req.user.role === 'merchant') {
+      // Ensure merchant can only access their own data
+      if (req.user.merchantId && req.user.merchantId.toString() !== merchantId.toString()) {
+        await auditLog(connection, 'SEARCH_UNAUTHORIZED_ATTEMPT', req.user.id, {
+          requestedMerchantId: merchantId,
+          userMerchantId: req.user.merchantId,
+          startDate,
+          endDate
+        });
+        return res.status(403).json({ error: 'Access denied: Cannot access other merchant data' });
+      }
+      
+      query = 'SELECT * FROM transactions WHERE merchant_id = ? AND created_at BETWEEN ? AND ?';
+      params = [merchantId, startDate, endDate];
+    } else if (req.user.role === 'admin') {
+      // Admins can search any merchant's transactions
+      query = 'SELECT * FROM transactions WHERE merchant_id = ? AND created_at BETWEEN ? AND ?';
+      params = [merchantId, startDate, endDate];
+    }
+    
+    const [rows] = await connection.execute(query, params);
+    
+    // Audit log the search operation
+    await auditLog(connection, 'TRANSACTION_SEARCH', req.user.id, {
+      merchantId,
+      startDate,
+      endDate,
+      resultCount: rows.length,
+      userRole: req.user.role
+    });
+    
+    res.json({ transactions: rows });
+  } catch (error) {
+    console.error('Transaction search error:', error);
+    res.status(500).json({ error: 'Failed to search transactions' });
+  } finally {
+    await connection.end();
+  }
 });
 
 // FIXED: Authentication and authorization required for refund endpoint
