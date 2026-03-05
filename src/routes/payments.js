@@ -49,6 +49,14 @@ const auditLog = async (connection, action, userId, details) => {
   }
 };
 
+// Helper function to mask card number
+const maskCardNumber = (cardNumber) => {
+  if (!cardNumber || cardNumber.length < 4) {
+    return '****';
+  }
+  return cardNumber.slice(-4).padStart(cardNumber.length, '*');
+};
+
 // VULNERABILITY: SQL Injection - card number passed directly into query
 router.post('/process', async (req, res) => {
   const { cardNumber, amount, currency, merchantId } = req.body;
@@ -62,10 +70,11 @@ router.post('/process', async (req, res) => {
   try {
     const [result] = await connection.execute(query);
     
-    // VULNERABILITY: Returning full card number in response
+    // FIXED: Return only masked card number in response
     res.json({
       transactionId: result.insertId,
-      cardNumber: cardNumber,
+      cardNumber: maskCardNumber(cardNumber),
+      lastFour: cardNumber.slice(-4),
       amount: amount,
       status: 'pending'
     });
