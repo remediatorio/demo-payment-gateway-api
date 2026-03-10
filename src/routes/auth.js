@@ -3,6 +3,7 @@ const router = express.Router();
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 const mysql = require('mysql2/promise');
+const bcrypt = require('bcrypt');
 
 // VULNERABILITY: SQL Injection in login
 router.post('/login', async (req, res) => {
@@ -25,14 +26,15 @@ router.post('/login', async (req, res) => {
   res.json({ token, user: users[0] });
 });
 
-// VULNERABILITY: Password stored in plain text
 router.post('/register', async (req, res) => {
   const { username, password, email } = req.body;
   const connection = await mysql.createConnection(config.database);
   
+  const hashedPassword = await bcrypt.hash(password, 10);
+  
   await connection.execute(
     'INSERT INTO users (username, password, email) VALUES (?, ?, ?)',
-    [username, password, email]
+    [username, hashedPassword, email]
   );
   
   res.json({ success: true });
