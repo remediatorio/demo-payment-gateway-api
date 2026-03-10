@@ -40,11 +40,42 @@ router.post('/import', (req, res) => {
   }
 });
 
-// VULNERABILITY: Mass assignment
+// FIXED: SQL Injection vulnerability - using whitelisted fields and parameterized query structure
 router.put('/users/:id', async (req, res) => {
   const updates = req.body;
-  const fields = Object.keys(updates).map(k => `${k} = '${updates[k]}'`).join(', ');
-  res.json({ updated: true, fields });
+  const userId = req.params.id;
+  
+  // Whitelist of allowed fields
+  const allowedFields = ['email', 'phone', 'name', 'address'];
+  
+  const setClauses = [];
+  const values = [];
+  
+  allowedFields.forEach(field => {
+    if (updates[field] !== undefined) {
+      setClauses.push(`${field} = ?`);
+      values.push(updates[field]);
+    }
+  });
+  
+  if (setClauses.length === 0) {
+    return res.status(400).json({ error: 'No valid fields to update' });
+  }
+  
+  // Add userId to values array for WHERE clause
+  values.push(userId);
+  
+  const query = `UPDATE users SET ${setClauses.join(', ')} WHERE id = ?`;
+  
+  // Note: In production, this would execute against actual database connection
+  // Example: await connection.execute(query, values);
+  
+  res.json({ 
+    updated: true, 
+    fields: setClauses.join(', '),
+    query: query,
+    parameterCount: values.length
+  });
 });
 
 module.exports = router;
