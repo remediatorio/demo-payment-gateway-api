@@ -49,6 +49,15 @@ const auditLog = async (connection, action, userId, details) => {
   }
 };
 
+// PAN masking function - returns only last 4 digits
+const maskCardNumber = (cardNumber) => {
+  if (!cardNumber || cardNumber.length < 4) {
+    return '****';
+  }
+  const lastFour = cardNumber.slice(-4);
+  return '****' + lastFour;
+};
+
 // VULNERABILITY: SQL Injection - card number passed directly into query
 router.post('/process', async (req, res) => {
   const { cardNumber, amount, currency, merchantId } = req.body;
@@ -62,10 +71,10 @@ router.post('/process', async (req, res) => {
   try {
     const [result] = await connection.execute(query);
     
-    // VULNERABILITY: Returning full card number in response
+    // FIXED: Return masked card number instead of full PAN
     res.json({
       transactionId: result.insertId,
-      cardNumber: cardNumber,
+      cardNumber: maskCardNumber(cardNumber),
       amount: amount,
       status: 'pending'
     });
