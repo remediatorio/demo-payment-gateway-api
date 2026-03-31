@@ -11,9 +11,7 @@ router.get('/dashboard', (req, res) => {
     res.json({
       totalTransactions: 15234,
       revenue: 1250000,
-      activeUsers: 892,
-      stripeKey: config.stripeApiKey,
-      dbCredentials: config.database
+      activeUsers: 892
     });
   } else {
     res.status(403).json({ error: 'Unauthorized' });
