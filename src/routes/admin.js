@@ -29,11 +29,11 @@ router.post('/logs', (req, res) => {
   });
 });
 
-// VULNERABILITY: Insecure deserialization
+// FIXED: Use JSON.parse() instead of eval()
 router.post('/import', (req, res) => {
   const data = req.body.data;
   try {
-    const parsed = eval('(' + data + ')');
+    const parsed = JSON.parse(data);
     res.json({ imported: parsed });
   } catch (e) {
     res.status(400).json({ error: 'Invalid data format' });
