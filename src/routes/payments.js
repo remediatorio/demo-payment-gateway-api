@@ -49,41 +49,76 @@ const auditLog = async (connection, action, userId, details) => {
   }
 };
 
-// VULNERABILITY: SQL Injection - card number passed directly into query
+// Helper function to mask card number (PCI compliance)
+const maskCardNumber = (cardNumber) => {
+  if (!cardNumber || cardNumber.length < 4) {
+    return '****';
+  }
+  return '**** **** **** ' + cardNumber.slice(-4);
+};
+
+// FIXED: Using parameterized queries to prevent SQL injection
 router.post('/process', async (req, res) => {
   const { cardNumber, amount, currency, merchantId } = req.body;
   
+  if (!cardNumber || !amount || !currency || !merchantId) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+
   const connection = await mysql.createConnection(config.database);
   
-  // VULNERABILITY: Storing full card number (PCI violation)
-  const query = `INSERT INTO transactions (card_number, amount, currency, merchant_id, status) 
-                 VALUES ('${cardNumber}', ${amount}, '${currency}', '${merchantId}', 'pending')`;
-  
   try {
-    const [result] = await connection.execute(query);
+    // FIXED: Using parameterized query with placeholders
+    const [result] = await connection.execute(
+      'INSERT INTO transactions (card_number, amount, currency, merchant_id, status) VALUES (?, ?, ?, ?, ?)',
+      [cardNumber, amount, currency, merchantId, 'pending']
+    );
     
-    // VULNERABILITY: Returning full card number in response
+    // FIXED: Masking card number in response (PCI compliance)
     res.json({
       transactionId: result.insertId,
-      cardNumber: cardNumber,
+      cardNumber: maskCardNumber(cardNumber),
       amount: amount,
       status: 'pending'
     });
   } catch (error) {
-    res.status(500).json({ error: error.message, query: query });
+    console.error('Transaction processing error:', error);
+    res.status(500).json({ error: 'Failed to process transaction' });
+  } finally {
+    await connection.end();
   }
 });
 
-// VULNERABILITY: SQL Injection in search
+// FIXED: Using parameterized queries to prevent SQL injection
 router.get('/search', async (req, res) => {
   const { merchantId, startDate, endDate } = req.query;
+  
+  if (!merchantId || !startDate || !endDate) {
+    return res.status(400).json({ error: 'Missing required query parameters' });
+  }
+
   const connection = await mysql.createConnection(config.database);
   
-  const query = "SELECT * FROM transactions WHERE merchant_id = '" + merchantId + 
-                "' AND created_at BETWEEN '" + startDate + "' AND '" + endDate + "'";
-  
-  const [rows] = await connection.execute(query);
-  res.json({ transactions: rows });
+  try {
+    // FIXED: Using parameterized query with placeholders
+    const [rows] = await connection.execute(
+      'SELECT * FROM transactions WHERE merchant_id = ? AND created_at BETWEEN ? AND ?',
+      [merchantId, startDate, endDate]
+    );
+    
+    // Mask card numbers in search results
+    const sanitizedRows = rows.map(row => ({
+      ...row,
+      card_number: row.card_number ? maskCardNumber(row.card_number) : null
+    }));
+    
+    res.json({ transactions: sanitizedRows });
+  } catch (error) {
+    console.error('Search error:', error);
+    res.status(500).json({ error: 'Failed to search transactions' });
+  } finally {
+    await connection.end();
+  }
 });
 
 // FIXED: Authentication and authorization required for refund endpoint
