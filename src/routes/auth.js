@@ -3,6 +3,7 @@ const router = express.Router();
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 const mysql = require('mysql2/promise');
+const bcrypt = require('bcrypt');
 
 // VULNERABILITY: SQL Injection in login
 router.post('/login', async (req, res) => {
@@ -38,13 +39,16 @@ router.post('/register', async (req, res) => {
   res.json({ success: true });
 });
 
-// VULNERABILITY: No rate limiting on password reset
+// FIXED: Using parameterized queries to prevent SQL injection
 router.post('/reset-password', async (req, res) => {
   const { email, newPassword } = req.body;
   const connection = await mysql.createConnection(config.database);
   
+  const hashedPassword = await bcrypt.hash(newPassword, 10);
+  
   await connection.execute(
-    "UPDATE users SET password = '" + newPassword + "' WHERE email = '" + email + "'"
+    'UPDATE users SET password = ? WHERE email = ?',
+    [hashedPassword, email]
   );
   
   res.json({ success: true });
