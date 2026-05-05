@@ -49,41 +49,101 @@ const auditLog = async (connection, action, userId, details) => {
   }
 };
 
-// VULNERABILITY: SQL Injection - card number passed directly into query
+// Input validation helper
+const validatePaymentInput = (cardNumber, amount, currency, merchantId) => {
+  const errors = [];
+
+  if (!cardNumber || typeof cardNumber !== 'string' || !/^\d{13,19}$/.test(cardNumber)) {
+    errors.push('Invalid card number format');
+  }
+
+  if (!amount || typeof amount !== 'number' || amount <= 0) {
+    errors.push('Invalid amount');
+  }
+
+  if (!currency || typeof currency !== 'string' || !/^[A-Z]{3}$/.test(currency)) {
+    errors.push('Invalid currency format');
+  }
+
+  if (!merchantId || typeof merchantId !== 'string') {
+    errors.push('Invalid merchant ID');
+  }
+
+  return errors;
+};
+
+// Helper function to mask card number (PCI compliance)
+const maskCardNumber = (cardNumber) => {
+  if (!cardNumber || cardNumber.length < 4) return '****';
+  return '**** **** **** ' + cardNumber.slice(-4);
+};
+
+// FIXED: SQL Injection vulnerability resolved with parameterized queries
 router.post('/process', async (req, res) => {
   const { cardNumber, amount, currency, merchantId } = req.body;
   
+  // Input validation
+  const validationErrors = validatePaymentInput(cardNumber, amount, currency, merchantId);
+  if (validationErrors.length > 0) {
+    return res.status(400).json({ error: 'Validation failed', details: validationErrors });
+  }
+
   const connection = await mysql.createConnection(config.database);
   
-  // VULNERABILITY: Storing full card number (PCI violation)
-  const query = `INSERT INTO transactions (card_number, amount, currency, merchant_id, status) 
-                 VALUES ('${cardNumber}', ${amount}, '${currency}', '${merchantId}', 'pending')`;
-  
   try {
-    const [result] = await connection.execute(query);
+    // FIXED: Using parameterized query to prevent SQL injection
+    // FIXED: Storing only last 4 digits for PCI compliance
+    const maskedCardNumber = cardNumber.slice(-4);
+    const [result] = await connection.execute(
+      'INSERT INTO transactions (card_number, amount, currency, merchant_id, status) VALUES (?, ?, ?, ?, ?)',
+      [maskedCardNumber, amount, currency, merchantId, 'pending']
+    );
     
-    // VULNERABILITY: Returning full card number in response
+    // FIXED: Returning masked card number instead of full number
     res.json({
       transactionId: result.insertId,
-      cardNumber: cardNumber,
+      cardNumber: maskCardNumber(cardNumber),
       amount: amount,
       status: 'pending'
     });
   } catch (error) {
-    res.status(500).json({ error: error.message, query: query });
+    console.error('Transaction processing error:', error);
+    res.status(500).json({ error: 'Failed to process transaction' });
+  } finally {
+    await connection.end();
   }
 });
 
-// VULNERABILITY: SQL Injection in search
+// FIXED: SQL Injection in search resolved with parameterized queries
 router.get('/search', async (req, res) => {
   const { merchantId, startDate, endDate } = req.query;
+  
+  // Input validation
+  if (!merchantId || !startDate || !endDate) {
+    return res.status(400).json({ error: 'merchantId, startDate, and endDate are required' });
+  }
+
+  // Validate date format
+  const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+  if (!dateRegex.test(startDate) || !dateRegex.test(endDate)) {
+    return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD' });
+  }
+
   const connection = await mysql.createConnection(config.database);
   
-  const query = "SELECT * FROM transactions WHERE merchant_id = '" + merchantId + 
-                "' AND created_at BETWEEN '" + startDate + "' AND '" + endDate + "'";
-  
-  const [rows] = await connection.execute(query);
-  res.json({ transactions: rows });
+  try {
+    // FIXED: Using parameterized query to prevent SQL injection
+    const [rows] = await connection.execute(
+      'SELECT * FROM transactions WHERE merchant_id = ? AND created_at BETWEEN ? AND ?',
+      [merchantId, startDate, endDate]
+    );
+    res.json({ transactions: rows });
+  } catch (error) {
+    console.error('Search error:', error);
+    res.status(500).json({ error: 'Failed to search transactions' });
+  } finally {
+    await connection.end();
+  }
 });
 
 // FIXED: Authentication and authorization required for refund endpoint
