@@ -3,6 +3,66 @@ const router = express.Router();
 const mysql = require('mysql2/promise');
 const config = require('../config');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
+
+// Encryption configuration for PCI compliance
+const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || config.encryptionKey;
+const IV_LENGTH = 16;
+const AUTH_TAG_LENGTH = 16;
+
+// Encrypt card number using AES-256-GCM
+const encryptCardNumber = (cardNumber) => {
+  if (!ENCRYPTION_KEY || ENCRYPTION_KEY.length !== 64) {
+    throw new Error('Invalid encryption key. Must be 64 hex characters (32 bytes).');
+  }
+  
+  const iv = crypto.randomBytes(IV_LENGTH);
+  const cipher = crypto.createCipheriv(ENCRYPTION_ALGORITHM, Buffer.from(ENCRYPTION_KEY, 'hex'), iv);
+  
+  let encrypted = cipher.update(cardNumber, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  
+  const authTag = cipher.getAuthTag();
+  
+  return {
+    encrypted: encrypted,
+    iv: iv.toString('hex'),
+    authTag: authTag.toString('hex')
+  };
+};
+
+// Decrypt card number
+const decryptCardNumber = (encryptedData, iv, authTag) => {
+  const decipher = crypto.createDecipheriv(
+    ENCRYPTION_ALGORITHM,
+    Buffer.from(ENCRYPTION_KEY, 'hex'),
+    Buffer.from(iv, 'hex')
+  );
+  
+  decipher.setAuthTag(Buffer.from(authTag, 'hex'));
+  
+  let decrypted = decipher.update(encryptedData, 'hex', 'utf8');
+  decrypted += decipher.final('utf8');
+  
+  return decrypted;
+};
+
+// Mask card number for display (show only last 4 digits)
+const maskCardNumber = (cardNumber) => {
+  if (!cardNumber || cardNumber.length < 4) {
+    return '****';
+  }
+  return '**** **** **** ' + cardNumber.slice(-4);
+};
+
+// Get last 4 digits of card
+const getLastFourDigits = (cardNumber) => {
+  if (!cardNumber || cardNumber.length < 4) {
+    return '';
+  }
+  return cardNumber.slice(-4);
+};
 
 // Authentication middleware
 const authenticateToken = (req, res, next) => {
@@ -49,41 +109,81 @@ const auditLog = async (connection, action, userId, details) => {
   }
 };
 
-// VULNERABILITY: SQL Injection - card number passed directly into query
+// FIXED: PCI-compliant payment processing with encrypted storage
 router.post('/process', async (req, res) => {
   const { cardNumber, amount, currency, merchantId } = req.body;
   
+  if (!cardNumber || !amount || !currency || !merchantId) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+  
   const connection = await mysql.createConnection(config.database);
   
-  // VULNERABILITY: Storing full card number (PCI violation)
-  const query = `INSERT INTO transactions (card_number, amount, currency, merchant_id, status) 
-                 VALUES ('${cardNumber}', ${amount}, '${currency}', '${merchantId}', 'pending')`;
-  
   try {
-    const [result] = await connection.execute(query);
+    // Encrypt the full card number
+    const { encrypted, iv, authTag } = encryptCardNumber(cardNumber);
     
-    // VULNERABILITY: Returning full card number in response
+    // Store only last 4 digits for display purposes
+    const lastFourDigits = getLastFourDigits(cardNumber);
+    
+    // Use parameterized query to prevent SQL injection
+    const query = `INSERT INTO transactions (card_number_encrypted, card_number_iv, card_number_auth_tag, card_last_four, amount, currency, merchant_id, status) 
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
+    
+    const [result] = await connection.execute(query, [
+      encrypted,
+      iv,
+      authTag,
+      lastFourDigits,
+      amount,
+      currency,
+      merchantId,
+      'pending'
+    ]);
+    
+    // Return masked card number only
     res.json({
       transactionId: result.insertId,
-      cardNumber: cardNumber,
+      cardNumber: maskCardNumber(cardNumber),
       amount: amount,
       status: 'pending'
     });
   } catch (error) {
-    res.status(500).json({ error: error.message, query: query });
+    console.error('Payment processing error:', error);
+    res.status(500).json({ error: 'Failed to process payment' });
+  } finally {
+    await connection.end();
   }
 });
 
-// VULNERABILITY: SQL Injection in search
+// FIXED: SQL Injection prevention with parameterized queries
 router.get('/search', async (req, res) => {
   const { merchantId, startDate, endDate } = req.query;
+  
+  if (!merchantId || !startDate || !endDate) {
+    return res.status(400).json({ error: 'Missing required query parameters' });
+  }
+  
   const connection = await mysql.createConnection(config.database);
   
-  const query = "SELECT * FROM transactions WHERE merchant_id = '" + merchantId + 
-                "' AND created_at BETWEEN '" + startDate + "' AND '" + endDate + "'";
-  
-  const [rows] = await connection.execute(query);
-  res.json({ transactions: rows });
+  try {
+    const query = "SELECT id, card_last_four, amount, currency, merchant_id, status, created_at FROM transactions WHERE merchant_id = ? AND created_at BETWEEN ? AND ?";
+    
+    const [rows] = await connection.execute(query, [merchantId, startDate, endDate]);
+    
+    // Return transactions with masked card numbers only
+    const sanitizedRows = rows.map(row => ({
+      ...row,
+      cardNumber: row.card_last_four ? '**** **** **** ' + row.card_last_four : '****'
+    }));
+    
+    res.json({ transactions: sanitizedRows });
+  } catch (error) {
+    console.error('Search error:', error);
+    res.status(500).json({ error: 'Failed to search transactions' });
+  } finally {
+    await connection.end();
+  }
 });
 
 // FIXED: Authentication and authorization required for refund endpoint
