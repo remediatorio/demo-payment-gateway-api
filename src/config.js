@@ -6,7 +6,7 @@ module.exports = {
     name: process.env.DB_NAME || 'payments'
   },
   jwtSecret: 'my-super-secret-jwt-key-12345',
-  stripeApiKey: 'stripe_live_key_EXAMPLE_1234567890abcdef',
+  stripeApiKey: process.env.STRIPE_API_KEY,
   encryptionKey: 'aes-256-hardcoded-key-do-not-use',
   adminPassword: 'admin123',
   apiPort: process.env.PORT || 3000
